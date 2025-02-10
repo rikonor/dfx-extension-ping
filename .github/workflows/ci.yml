@@ -1,0 +1,115 @@
+name: ci
+
+on: 
+  push:
+    branches: main
+
+permissions:
+  contents: write
+
+env:
+  NAME: ping
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        platform:
+          - runs-on: macos-latest
+            target: aarch64-apple-darwin
+
+          - runs-on: macos-latest
+            target: x86_64-apple-darwin
+
+          - runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    runs-on: ${{ matrix.platform.runs-on }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          rustup target add \
+            ${{ matrix.platform.target }}
+
+          make \
+            CARGO_TARGET=${{ matrix.platform.target }} \
+            CARGO_RELEASE=1 \
+            EXT_RELEASE=1 \
+              bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.target }}
+          path: ${{ env.NAME }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+
+      - name: release tag
+        run: |
+          EXT_VERSION=$(jq -r .version dfx/extension.json)
+          RELEASE_TAG="${EXT_VERSION}"
+
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> "${GITHUB_ENV}"
+
+      - name: artifacts
+        run: |
+          ARTIFACTS=$(mktemp)
+
+          echo "ARTIFACTS<<EOF" >> $GITHUB_ENV
+
+          TARGETS=(
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+            x86_64-unknown-linux-gnu
+          )
+
+          for TARGET in ${TARGETS[@]}; do
+            ARTIFACT="${NAME}-${TARGET}.tar.gz"
+            
+            mv \
+              ${TARGET}/${NAME}.tar.gz \
+              ${ARTIFACT}
+            
+            echo ${ARTIFACT} >> $GITHUB_ENV
+          done
+
+          echo "EOF" >> $GITHUB_ENV  
+
+      - name: checksums
+        run: |
+          CHECKSUMS=$(mktemp)
+
+          for ARTIFACT in ${ARTIFACTS}; do
+              shasum -a256 ${ARTIFACT} >> ${CHECKSUMS}
+          done
+
+          echo "CHECKSUMS=${CHECKSUMS}" >> "${GITHUB_ENV}"
+
+      - name: release notes
+        run: |
+          NOTES=$(mktemp)
+
+          CODE_BLOCK='```'
+
+          cat > ${NOTES} <<EOF
+          ## Checksums
+
+          ${CODE_BLOCK}
+          $(cat ${CHECKSUMS})
+          ${CODE_BLOCK}
+          EOF
+
+          echo "NOTES=${NOTES}" >> "${GITHUB_ENV}"
+
+      - uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda
+        with:
+          name: ${{ env.NAME }}-v${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.NAME }}-v${{ env.RELEASE_TAG }}
+          body_path: ${{ env.NOTES }}
+          files: ${{ env.ARTIFACTS }}
